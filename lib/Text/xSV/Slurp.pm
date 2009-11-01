@@ -17,11 +17,11 @@ Text::xSV::Slurp - Convert xSV data to common data shapes.
 
 =head1 VERSION
 
-Version 0.11
+Version 0.20
 
 =cut
 
-our $VERSION = '0.11';
+our $VERSION = '0.20';
 
 =head1 SYNOPSIS
 
@@ -74,7 +74,7 @@ Option summary:
 
 =item * C<key> - xSV string or ARRAY used to build the keys of the C<hoh> shape
 
-=item * C<text_csv> - option hash for L<Text::CSV> constructor
+=item * C<text_csv> - option hash for L<Text::CSV>/L<Text::CSV_XS> constructor
 
 =back
 
@@ -101,29 +101,25 @@ The C<shape> parameter supports values of C<aoa>, C<aoh>, C<hoa> or C<hoh>. The
 default shape is C<aoh>. Each shape affects certain parameters differently (see
 below).
 
-The C<text_csv> option can be used to control L<Text::CSV> parsing. The given
-HASH reference is passed to the L<Text::CSV> constructor. If the C<text_csv>
-option is undefined, the default L<Text::CSV> constructor is called. For
-example, to change the separator to a colon, you could do the following:
+The C<text_csv> option can be used to control L<Text::CSV>/L<Text::CSV_XS>
+parsing. The given HASH reference is passed to the L<Text::CSV> constructor. If
+the C<text_csv> option is undefined, the default L<Text::CSV> constructor is
+called. For example, to change the separator to a colon, you could do the
+following:
 
    my $aoh = xsv_slurp( file => 'foo.csv',
                     text_csv => { sep_char => ':' } );
 
-=head3 C<shape>-specific option details:
+=head3 aoa
 
 =over
 
-   ## examples below assume the following data
+example input:
 
    h1,h2,h3
    l,m,n
    p,q,r
 
-=back
-
-=head4 aoa
-
-=over
 
 example data structure:
 
@@ -166,9 +162,15 @@ full example:
 
 =back
 
-=head4 aoh
+=head3 aoh
 
 =over
+
+example input:
+
+   h1,h2,h3
+   l,m,n
+   p,q,r
 
 example data structure:
 
@@ -210,9 +212,15 @@ full example:
 
 =back
 
-=head4 hoa
+=head3 hoa
 
 =over
+
+example input:
+
+   h1,h2,h3
+   l,m,n
+   p,q,r
 
 example data structure:
 
@@ -255,9 +263,15 @@ full example:
 
 =back
 
-=head4 hoh
+=head3 hoh
 
 =over
+
+example input:
+
+   h1,h2,h3
+   l,m,n
+   p,q,r
 
 example data structure (assuming a C<key> of C<'h2,h3'>):
 
@@ -278,6 +292,9 @@ shape specifics:
 =item * C<row_grep> - passed a HASH reference of column name / value pairs,
                       should return true or false whether the row should be
                       included or not
+
+=item * C<on_collide> - specify how key collisions should be handled (see
+                        L</HoH collision handlers>)
 
 =back
 
@@ -303,6 +320,154 @@ full example:
    ##   }
 
 =back
+
+=head1 HoH storage handlers
+
+Using the C<hoh> shape can result in non-unique C<key> combinations. The default
+action is to simply assign the values to the given slot as they are encountered,
+resulting in any prior values being lost.
+
+For example, using C<h1,h2> as the indexing key with the default collision
+handler:
+
+   $xsv_data = <<EOXSV;
+   h1,h2,h3
+   1,2,3
+   1,2,5
+   EOXSV
+
+   $hoh = xsv_slurp( string => $xsv_data,
+                     shape  => 'hoh',
+                     key    => 'h1,h2'
+                   );
+   
+would result in the initial value in the C<h3> column being lost. The resulting
+data structure would only record the C<5> value:
+
+   {
+      1 => { 2 => { h3 => 5 } },  ## 3 sir!
+   }
+
+Typically this is not very useful. The user probably wanted to aggregate the
+values in some way. This is where the C<on_store> and C<on_collide> handlers
+come in, allowing the caller to specify how these assignments should be
+handled.
+
+The C<on_store> handler is called for each assignment action, while the
+C<on_collide> handler is only called when an actual collision occurs (i.e.,
+the nested value path for the current line is the same as a prior line).
+
+If instead we wanted to push the values onto an array, we could use the built-in
+C<push> handler for the C<on_store> event as follows:
+
+   $hoh = xsv_slurp( string   => $xsv_data,
+                     shape    => 'hoh',
+                     key      => 'h1,h2',
+                     on_store => 'push',
+                   );
+
+the resulting C<HoH>, using the same data as above, would instead look like:
+
+   {
+      1 => { 2 => { h3 => [3,5] } },  ## 3 sir!
+   }
+
+Or if we wanted to sum the values we could us the C<sum> handler for the
+C<on_collide> event:
+
+   $hoh = xsv_slurp( string     => $xsv_data,
+                     shape      => 'hoh',
+                     key        => 'h1,h2',
+                     on_collide => 'sum',
+                   );
+                   
+resulting in the summation of the values:
+
+   {
+      1 => { 2 => { h3 => 8 } },
+   }
+
+=head2 builtin C<on_store> handlers
+
+A number of builtin C<on_store> handlers are provided and can be specified
+by name.
+
+The example data structures below use the following data.
+
+   h1,h2,h3
+   1,2,3
+   1,2,5
+
+=head3 count
+
+Count the times a key occurs.
+
+   { 1 => { 2 => { h3 => 2 } } }
+
+=head3 frequency
+
+Create a frequency count of values.
+
+   { 1 => { 2 => { h3 => { 3 => 1, 5 => 1 } } } }
+
+=head3 push
+
+C<push> values onto an array *always*.
+
+   { 1 => { 2 => { h3 => [ 3, 5 ] } } }
+
+=head3 unshift
+
+C<unshift> values onto an array *always*.
+
+   { 1 => { 2 => { h3 => [ 5, 3 ] } } }
+
+=head2 builtin C<on_collide> handlers
+
+A number of builtin C<on_collide> handlers are provided and can be specified
+by name.
+
+The example data structures below use the following data.
+
+   h1,h2,h3
+   1,2,3
+   1,2,5
+
+=head3 sum
+
+Sum the values.
+
+   { 1 => { 2 => { h3 => 8 } } }
+
+=head3 average
+
+Average the values.
+
+   { 1 => { 2 => { h3 => 4 } } }
+
+=head3 push
+
+C<push> values onto an array *only on colliding*.
+
+   { 1 => { 2 => { h3 => [ 3, 5 ] } } }
+
+=head3 unshift
+
+C<unshift> values onto an array *only on colliding*.
+
+   { 1 => { 2 => { h3 => [ 5, 3 ] } } }
+
+=head3 die
+
+Carp::confess if a collision occurs.
+
+   Error: key collision in HoH construction (key-value path was: { 'h1' => '1' }, { 'h2' => '2' })
+
+=head3 warn
+
+Carp::cluck if a collision occurs.
+
+   Warning: key collision in HoH construction (key-value path was: { 'h1' => '1' }, { 'h2' => '2' })
 
 =cut
 
@@ -561,76 +726,127 @@ sub _as_hoa
       }
 
    return \%hoa;
-   }   
+   }
 
-## predefined methods for handling hoh collisions
-my %predefined_aggs =
+my %named_handlers =
    (
    
-   ## average
-   ## weighted-average
-   
-   ## assign
-   'assign' =>  sub
+## predefined methods for handling hoh storage
+   on_store =>
       {
-      my ( $key, $nval, $oval, $line, $hoh, $scratch ) = @_;
-      return $nval;
-      },
 
-   ## die
-   'die' =>  sub
-      {
-      my ( $key, $nval, $oval, $line, $hoh, $scratch ) = @_;
-      if ( defined $oval )
+      ## count
+      'count' =>  sub
          {
-         confess "Error: key collision in HoH construction";
-         }
-      },
+         my %opts = @_;
+         return ( $opts{old_value} || 0 ) + 1;
+         },
 
-   ## warn
-   'warn' =>  sub
-      {
-      my ( $key, $nval, $oval, $line, $hoh, $scratch ) = @_;
-      if ( defined $oval )
+      ## value histogram (count occurences of each value)
+      'frequency' =>  sub
          {
-         cluck "Warning: key collision in HoH construction";
-         }
+         my %opts = @_;
+         my $ref = $opts{old_value} || {};
+         $ref->{ $opts{new_value} } ++;
+         return $ref;
+         },
+      
+      ## push to array
+      'push' =>  sub
+         {
+         my %opts = @_;
+         my $ref = $opts{old_value} || [];
+         push @{ $ref }, $opts{new_value}; 
+         return $ref;
+         },
+
+      ## unshift to array
+      'unshift' =>  sub
+         {
+         my %opts = @_;
+         my $ref = $opts{old_value} || [];
+         unshift @{ $ref }, $opts{new_value}; 
+         return $ref;
+         },
+         
       },
 
-   ## sum
-   'sum' =>  sub
+   ## predefined methods for handling hoh collisions
+   on_collide =>
       {
-      my ( $key, $nval, $oval, $line, $hoh, $scratch ) = @_;
-      return ( $oval || 0 ) + ( $nval || 0 );
-      },
-
-   ## push to array
-   'push' =>  sub
-      {
-      my ( $key, $nval, $oval, $line, $hoh, $scratch ) = @_;
-      my $ref = $oval || [];
-      push @{ $ref }, $nval; 
-      return $ref;
-      },
-
-   ## unshift to array
-   'unshift' =>  sub
-      {
-      my ( $key, $nval, $oval, $line, $hoh, $scratch ) = @_;
-      my $ref = $oval || [];
-      unshift @{ $ref }, $nval; 
-      return $ref;
-      },
-
-   ## value histogram
-   'frequency' =>  sub
-      {
-      my ( $key, $nval, $oval, $line, $hoh, $scratch ) = @_;
-      my $ref = $oval || {};
-      $ref->{$nval} ++;
-      return $ref;
-      },
    
+      ## sum
+      'sum' =>  sub
+         {
+         my %opts = @_;
+         return ( $opts{old_value} || 0 ) + ( $opts{new_value} || 0 );
+         },
+
+      ## average
+      'average' =>  sub
+         {
+         my %opts = @_;
+         if ( ! exists $opts{'scratch_pad'}{'count'} )
+            {
+            $opts{'scratch_pad'}{'count'} = 1;
+            $opts{'scratch_pad'}{'sum'}   = $opts{old_value};
+            }
+         $opts{'scratch_pad'}{'count'}++;
+         $opts{'scratch_pad'}{'sum'} += $opts{new_value};
+         return $opts{'scratch_pad'}{'sum'} / $opts{'scratch_pad'}{'count'};
+         },
+
+      ## die
+      'die' =>  sub
+         {
+         my %opts = @_;
+         if ( defined $opts{old_value} )
+            {
+            my @kv_pairs   = @{ $opts{key_value_path} };
+            my @kv_strings = map { "{ '$_->[0]' => '$_->[1]' }" } @kv_pairs;
+            my $kv_path    = join ', ', @kv_strings;
+            confess "Error: key collision in HoH construction (key-value path was: $kv_path)";
+            }
+         },
+
+      ## warn
+      'warn' =>  sub
+         {
+         my %opts = @_;
+         if ( defined $opts{old_value} )
+            {
+            my @kv_pairs   = @{ $opts{key_value_path} };
+            my @kv_strings = map { "{ '$_->[0]' => '$_->[1]' }" } @kv_pairs;
+            my $kv_path    = join ', ', @kv_strings;
+            cluck "Warning: key collision in HoH construction (key-value path was: $kv_path)";
+            }
+         return $opts{new_value};
+         },
+
+      ## push to array
+      'push' =>  sub
+         {
+         my %opts = @_;
+         my $ref = ref $opts{old_value}
+                 ? $opts{old_value}
+                 : [ $opts{old_value} ];
+         push @{ $ref }, $opts{new_value}; 
+         return $ref;
+         },
+
+      ## unshift to array
+      'unshift' =>  sub
+         {
+         my %opts = @_;
+         my $ref = ref $opts{old_value}
+                 ? $opts{old_value}
+                 : [ $opts{old_value} ];
+         unshift @{ $ref }, $opts{new_value}; 
+         return $ref;
+         },
+         
+      },
+
    );
 
 ## arguments:
@@ -684,23 +900,46 @@ sub _as_hoh
 
          }
 
-      ## set the aggregation method for each header. currently this is global,
-      ## but will eventually be per header.
-      my %agg_actions;
+      ## set the on_collide handler at the default level and by header
+      my %storage_handlers;
 
-      if ( $o->{'agg'} )
+      for my $header ( @headers )
          {
-
-         my $agg = $predefined_aggs{ $o->{'agg'} } || $o->{'agg'};
-
-         for my $header ( @headers )
+         
+         for my $type ( qw/ on_store on_collide / )
             {
+            
+            my $handler = $o->{$type};
 
-            $agg_actions{$header} = $agg;
+            next if ! $handler;
+            
+            if ( ref $handler eq 'HASH' )
+               {
+               $handler = $handler->{$header};
+               }
+            
+            next if ! $handler;
+
+            if ( ! ref $handler )
+               {
+
+               confess "Error: unknown '$type' handler given: $handler"
+                  if ! exists $named_handlers{$type}{$handler};
+
+               $handler = $named_handlers{$type}{$handler};
+               }
                
+            confess "Error: cannot set multiple storage handlers for '$header'"
+               if $storage_handlers{$header};
+
+            $storage_handlers{$header}{$type} = $handler;
+            
             }
 
          }
+         
+      ## per-header scratch-pads used in collision functions
+      my %scratch_pads = map { $_ => {} } @headers;
 
       while ( my $line = <$handle> )
          {
@@ -724,12 +963,16 @@ sub _as_hoh
          ## step through the nested keys
          my $leaf = \%hoh;
          
+         my @val;
+         
          for my $k ( @key )
             {
             
             my $v         = $line{$k};
             $leaf->{$v} ||= {};
             $leaf         = $leaf->{$v};
+            
+            push @val, $v;
             
             }
          
@@ -748,12 +991,23 @@ sub _as_hoh
 
             my $new_value = $line{$key};
 
-            my $agg = $agg_actions{$key};
-
-            if ( $agg )
+            my $on_collide = $storage_handlers{$key}{'on_collide'};
+            my $on_store   = $storage_handlers{$key}{'on_store'};
+            
+            if ( $on_store || $on_collide && exists $leaf->{$key} )
                {
                
-               $new_value = $agg->( $key, $new_value, $leaf->{$key}, \%line, \%hoh );
+               my $handler = $on_collide || $on_store;
+
+               $new_value = $handler->(
+                  key            => $key,
+                  key_value_path => [ map [ $key[$_] => $val[$_] ], 0 .. $#key ],
+                  old_value      => $leaf->{$key},
+                  new_value      => $new_value,
+                  line_hash      => \%line,
+                  hoh            => \%hoh,
+                  scratch_pad    => $scratch_pads{$key},
+                  );
 
                }
 
@@ -803,19 +1057,11 @@ Dan Boorstein, C<< <dan at boorstein.net> >>
 
 =over
 
-=item * agg specific actions by key
+=item * add weighted-average collide keys and tests
 
-=item * add average, weighted-average and count agg keys and tests
+=item * document hoh 'on_store/on_collide' custom keys
 
-=item * add test for warn agg key
-
-=item * die and warn agg keys should include the value path in the output
-
-=item * document hoh 'agg' predefined keys
-
-=item * document hoh 'agg' custom keys
-
-=item * add a recipes/examples section to cover grep and agg examples
+=item * add a recipes/examples section to cover grep and on_collide examples
 
 =back
 
