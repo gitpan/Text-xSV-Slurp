@@ -1,6 +1,6 @@
 ---
 name: Text-xSV-Slurp
-version: 0.20
+version: 0.21
 author:
   - 'Dan Boorstein <dan@boorstein.net>'
 abstract: Convert xSV data to common data shapes.
@@ -14,7 +14,7 @@ build_requires:
 provides:
   Text::xSV::Slurp:
     file: lib/Text/xSV/Slurp.pm
-    version: 0.20
+    version: 0.21
 generated_by: Module::Build version 0.280802
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.2.html

@@ -7,6 +7,14 @@ use Carp 'confess', 'cluck';
 use Text::CSV;
 use IO::String;
 
+use constant HOH_HANDLER_KEY            => 0;
+use constant HOH_HANDLER_KEY_VALUE_PATH => 1;
+use constant HOH_HANDLER_OLD_VALUE      => 2;
+use constant HOH_HANDLER_NEW_VALUE      => 3;
+use constant HOH_HANDLER_LINE_HASH      => 4;
+use constant HOH_HANDLER_HOH            => 5;
+use constant HOH_HANDLER_SCRATCH_PAD    => 6;
+
 use base 'Exporter';
 
 our @EXPORT = qw/ xsv_slurp /;
@@ -17,11 +25,11 @@ Text::xSV::Slurp - Convert xSV data to common data shapes.
 
 =head1 VERSION
 
-Version 0.20
+Version 0.21
 
 =cut
 
-our $VERSION = '0.20';
+our $VERSION = '0.21';
 
 =head1 SYNOPSIS
 
@@ -73,6 +81,10 @@ Option summary:
 =item * C<row_grep> - skip a subset of rows based on user callback
 
 =item * C<key> - xSV string or ARRAY used to build the keys of the C<hoh> shape
+
+=item * C<on_store> - redefine how the C<hoh> shape should store values
+
+=item * C<on_collide> - redefine how the C<hoh> shape should handle key collisions
 
 =item * C<text_csv> - option hash for L<Text::CSV>/L<Text::CSV_XS> constructor
 
@@ -555,21 +567,13 @@ sub _as_aoa
    my @cols;
    my $col_grep;
    
-   while ( my $line = <$handle> )
+   while ( my $line = $csv->getline($handle) )
       {
-      chomp $line;
       
-      if ( ! $csv->parse($line) )
-         {
-         confess 'Error: ' . $csv->error_diag;
-         }
-         
-      my @line = $csv->fields;
-
       ## skip unwanted rows
       if ( defined $o->{'row_grep'} )
          {
-         next if ! $o->{'row_grep'}->( \@line );
+         next if ! $o->{'row_grep'}->( $line );
          }
       
       ## remove unwanted cols   
@@ -578,12 +582,12 @@ sub _as_aoa
          if ( ! $col_grep )
             {
             $col_grep++;
-            @cols = $o->{'col_grep'}->( 0 .. $#line );
+            @cols = $o->{'col_grep'}->( 0 .. $#{ $line } );
             }
-         @line = @line[@cols];
+         @{ $line } = @{ $line }[@cols];
          }
 
-      push @aoa, \@line;
+      push @aoa, $line;
       
       }
    
@@ -621,18 +625,12 @@ sub _as_aoh
          @grep_headers = $o->{'col_grep'}->( @headers );
          }
       
-      while ( my $line = <$handle> )
+      while ( my $line = $csv->getline($handle) )
          {
-         chomp $line;
          
-         if ( ! $csv->parse($line) )
-            {
-            confess 'Error: ' . $csv->error_diag;
-            }
-            
          my %line;
          
-         @line{ @headers } = $csv->fields;
+         @line{ @headers } = @{ $line };
 
          ## skip unwanted rows
          if ( defined $o->{'row_grep'} )
@@ -691,18 +689,11 @@ sub _as_hoa
          @hoa{ @headers } = map { [] } @headers;
          }
       
-      while ( my $line = <$handle> )
+      while ( my $line = $csv->getline($handle) )
          {
-         chomp $line;
-         
-         if ( ! $csv->parse($line) )
-            {
-            confess 'Error: ' . $csv->error_diag;
-            }
-            
          my %line;
          
-         @line{ @headers } = $csv->fields;
+         @line{ @headers } = @{ $line };
 
          ## skip unwanted rows
          if ( defined $o->{'row_grep'} )
@@ -738,34 +729,30 @@ my %named_handlers =
       ## count
       'count' =>  sub
          {
-         my %opts = @_;
-         return ( $opts{old_value} || 0 ) + 1;
+         return ( $_[HOH_HANDLER_OLD_VALUE] || 0 ) + 1;
          },
 
       ## value histogram (count occurences of each value)
       'frequency' =>  sub
          {
-         my %opts = @_;
-         my $ref = $opts{old_value} || {};
-         $ref->{ $opts{new_value} } ++;
+         my $ref = $_[HOH_HANDLER_OLD_VALUE] || {};
+         $ref->{ $_[HOH_HANDLER_NEW_VALUE] } ++;
          return $ref;
          },
       
       ## push to array
       'push' =>  sub
          {
-         my %opts = @_;
-         my $ref = $opts{old_value} || [];
-         push @{ $ref }, $opts{new_value}; 
+         my $ref = $_[HOH_HANDLER_OLD_VALUE] || [];
+         push @{ $ref }, $_[HOH_HANDLER_NEW_VALUE]; 
          return $ref;
          },
 
       ## unshift to array
       'unshift' =>  sub
          {
-         my %opts = @_;
-         my $ref = $opts{old_value} || [];
-         unshift @{ $ref }, $opts{new_value}; 
+         my $ref = $_[HOH_HANDLER_OLD_VALUE] || [];
+         unshift @{ $ref }, $_[HOH_HANDLER_NEW_VALUE]; 
          return $ref;
          },
          
@@ -778,31 +765,28 @@ my %named_handlers =
       ## sum
       'sum' =>  sub
          {
-         my %opts = @_;
-         return ( $opts{old_value} || 0 ) + ( $opts{new_value} || 0 );
+         return ( $_[HOH_HANDLER_OLD_VALUE] || 0 ) + ( $_[HOH_HANDLER_NEW_VALUE] || 0 );
          },
 
       ## average
       'average' =>  sub
          {
-         my %opts = @_;
-         if ( ! exists $opts{'scratch_pad'}{'count'} )
+         if ( ! exists $_[HOH_HANDLER_SCRATCH_PAD]{'count'} )
             {
-            $opts{'scratch_pad'}{'count'} = 1;
-            $opts{'scratch_pad'}{'sum'}   = $opts{old_value};
+            $_[HOH_HANDLER_SCRATCH_PAD]{'count'} = 1;
+            $_[HOH_HANDLER_SCRATCH_PAD]{'sum'}   = $_[HOH_HANDLER_OLD_VALUE];
             }
-         $opts{'scratch_pad'}{'count'}++;
-         $opts{'scratch_pad'}{'sum'} += $opts{new_value};
-         return $opts{'scratch_pad'}{'sum'} / $opts{'scratch_pad'}{'count'};
+         $_[HOH_HANDLER_SCRATCH_PAD]{'count'}++;
+         $_[HOH_HANDLER_SCRATCH_PAD]{'sum'} += $_[HOH_HANDLER_NEW_VALUE];
+         return $_[HOH_HANDLER_SCRATCH_PAD]{'sum'} / $_[HOH_HANDLER_SCRATCH_PAD]{'count'};
          },
 
       ## die
       'die' =>  sub
          {
-         my %opts = @_;
-         if ( defined $opts{old_value} )
+         if ( defined $_[HOH_HANDLER_OLD_VALUE] )
             {
-            my @kv_pairs   = @{ $opts{key_value_path} };
+            my @kv_pairs   = @{ $_[HOH_HANDLER_KEY_VALUE_PATH] };
             my @kv_strings = map { "{ '$_->[0]' => '$_->[1]' }" } @kv_pairs;
             my $kv_path    = join ', ', @kv_strings;
             confess "Error: key collision in HoH construction (key-value path was: $kv_path)";
@@ -812,36 +796,33 @@ my %named_handlers =
       ## warn
       'warn' =>  sub
          {
-         my %opts = @_;
-         if ( defined $opts{old_value} )
+         if ( defined $_[HOH_HANDLER_OLD_VALUE] )
             {
-            my @kv_pairs   = @{ $opts{key_value_path} };
+            my @kv_pairs   = @{ $_[HOH_HANDLER_KEY_VALUE_PATH] };
             my @kv_strings = map { "{ '$_->[0]' => '$_->[1]' }" } @kv_pairs;
             my $kv_path    = join ', ', @kv_strings;
             cluck "Warning: key collision in HoH construction (key-value path was: $kv_path)";
             }
-         return $opts{new_value};
+         return $_[HOH_HANDLER_NEW_VALUE];
          },
 
       ## push to array
       'push' =>  sub
          {
-         my %opts = @_;
-         my $ref = ref $opts{old_value}
-                 ? $opts{old_value}
-                 : [ $opts{old_value} ];
-         push @{ $ref }, $opts{new_value}; 
+         my $ref = ref $_[HOH_HANDLER_OLD_VALUE]
+                 ? $_[HOH_HANDLER_OLD_VALUE]
+                 : [ $_[HOH_HANDLER_OLD_VALUE] ];
+         push @{ $ref }, $_[HOH_HANDLER_NEW_VALUE]; 
          return $ref;
          },
 
       ## unshift to array
       'unshift' =>  sub
          {
-         my %opts = @_;
-         my $ref = ref $opts{old_value}
-                 ? $opts{old_value}
-                 : [ $opts{old_value} ];
-         unshift @{ $ref }, $opts{new_value}; 
+         my $ref = ref $_[HOH_HANDLER_OLD_VALUE]
+                 ? $_[HOH_HANDLER_OLD_VALUE]
+                 : [ $_[HOH_HANDLER_OLD_VALUE] ];
+         unshift @{ $ref }, $_[HOH_HANDLER_NEW_VALUE]; 
          return $ref;
          },
          
@@ -941,18 +922,12 @@ sub _as_hoh
       ## per-header scratch-pads used in collision functions
       my %scratch_pads = map { $_ => {} } @headers;
 
-      while ( my $line = <$handle> )
+      while ( my $line = $csv->getline($handle) )
          {
-         chomp $line;
-         
-         if ( ! $csv->parse($line) )
-            {
-            confess 'Error: ' . $csv->error_diag;
-            }
             
          my %line;
          
-         @line{ @headers } = $csv->fields;
+         @line{ @headers } = @{ $line };
          
          ## skip unwanted rows
          if ( defined $o->{'row_grep'} )
@@ -1000,13 +975,13 @@ sub _as_hoh
                my $handler = $on_collide || $on_store;
 
                $new_value = $handler->(
-                  key            => $key,
-                  key_value_path => [ map [ $key[$_] => $val[$_] ], 0 .. $#key ],
-                  old_value      => $leaf->{$key},
-                  new_value      => $new_value,
-                  line_hash      => \%line,
-                  hoh            => \%hoh,
-                  scratch_pad    => $scratch_pads{$key},
+                  $key,                                         ## HOH_HANDLER_KEY
+                  [ map [ $key[$_] => $val[$_] ], 0 .. $#key ], ## HOH_HANDLER_KEY_VALUE_PATH
+                  $leaf->{$key},                                ## HOH_HANDLER_OLD_VALUE
+                  $new_value,                                   ## HOH_HANDLER_NEW_VALUE
+                  \%line,                                       ## HOH_HANDLER_LINE_HASH
+                  \%hoh,                                        ## HOH_HANDLER_HOH
+                  $scratch_pads{$key},                          ## HOH_HANDLER_SCRATCH_PAD
                   );
 
                }
